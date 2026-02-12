@@ -24,6 +24,17 @@ export { GENRES, ALPHABET };
 
 const GUTENDEX_URL = 'https://gutendex.com/books';
 
+// Detect if running as a static site (GitHub Pages) vs with backend server
+const isStaticDeploy = !window.location.hostname.includes('localhost') &&
+  !window.location.hostname.includes('127.0.0.1');
+
+// CORS proxy for fetching Gutenberg text files from static deployments
+const CORS_PROXY = 'https://corsproxy.io/?url=';
+
+function proxyUrl(url) {
+  return isStaticDeploy ? `${CORS_PROXY}${encodeURIComponent(url)}` : url;
+}
+
 export function useGutenberg() {
   const [books, setBooks] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -143,7 +154,7 @@ export function useBookText(bookId) {
       const urls = GUTENBERG_TEXT_URLS(bookId);
       for (const url of urls) {
         try {
-          const res = await fetch(url);
+          const res = await fetch(proxyUrl(url));
           if (res.ok) {
             const rawText = await res.text();
             // Strip Gutenberg header/footer
@@ -229,7 +240,7 @@ export function useBookSummary(bookId, title, author) {
 
       for (const url of urls) {
         try {
-          const res = await fetch(url);
+          const res = await fetch(proxyUrl(url));
           if (res.ok) {
             text = await res.text();
             break;
