@@ -319,7 +319,19 @@ app.get('/api/gutenberg/text/:bookId', async (req, res) => {
   res.status(404).json({ error: 'Book text not found' });
 });
 
+// Serve production build static files
+const distPath = path.join(__dirname, '..', 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  // SPA fallback: serve index.html for all non-API routes
+  app.get('/{*splat}', (req, res) => {
+    if (!req.path.startsWith('/api')) {
+      res.sendFile(path.join(distPath, 'index.html'));
+    }
+  });
+}
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Gutenberg E-Reader running at http://localhost:${PORT}`);
 });
