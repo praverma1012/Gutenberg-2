@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { generateBookCover, getCachedCover } from '../lib/covers.js';
+import { generateSummary, getCachedSummary } from '../lib/summary.js';
 
 const GENRES = [
   { key: 'all', label: 'All Genres' },
@@ -19,6 +21,8 @@ const GENRES = [
 const ALPHABET = '#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
 export { GENRES, ALPHABET };
+
+const GUTENDEX_URL = 'https://gutendex.com/books';
 
 export function useGutenberg() {
   const [books, setBooks] = useState([]);
@@ -53,7 +57,7 @@ export function useGutenberg() {
 
       params.set('mime_type', 'text/plain');
 
-      const resp = await fetch(`/api/gutenberg/books?${params.toString()}`, {
+      const resp = await fetch(`${GUTENDEX_URL}?${params.toString()}`, {
         signal: controller.signal,
       });
       const data = await resp.json();
@@ -120,6 +124,12 @@ export function useGutenberg() {
   };
 }
 
+const GUTENBERG_TEXT_URLS = (id) => [
+  `https://www.gutenberg.org/files/${id}/${id}-0.txt`,
+  `https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`,
+  `https://www.gutenberg.org/files/${id}/${id}.txt`,
+];
+
 export function useBookText(bookId) {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
@@ -129,41 +139,48 @@ export function useBookText(bookId) {
     if (!bookId) return;
     setLoading(true);
 
-    fetch(`/api/gutenberg/text/${bookId}`)
-      .then(res => {
-        if (!res.ok) throw new Error('Failed to load book');
-        return res.text();
-      })
-      .then(rawText => {
-        // Strip Gutenberg header/footer
-        let cleaned = rawText;
-        const startMarkers = ['*** START OF THE PROJECT GUTENBERG', '*** START OF THIS PROJECT GUTENBERG', '***START OF THE PROJECT GUTENBERG', '***START OF THIS PROJECT GUTENBERG'];
-        const endMarkers = ['*** END OF THE PROJECT GUTENBERG', '*** END OF THIS PROJECT GUTENBERG', '***END OF THE PROJECT GUTENBERG', '***END OF THIS PROJECT GUTENBERG', 'End of the Project Gutenberg', 'End of Project Gutenberg'];
+    async function fetchText() {
+      const urls = GUTENBERG_TEXT_URLS(bookId);
+      for (const url of urls) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            const rawText = await res.text();
+            // Strip Gutenberg header/footer
+            let cleaned = rawText;
+            const startMarkers = ['*** START OF THE PROJECT GUTENBERG', '*** START OF THIS PROJECT GUTENBERG', '***START OF THE PROJECT GUTENBERG', '***START OF THIS PROJECT GUTENBERG'];
+            const endMarkers = ['*** END OF THE PROJECT GUTENBERG', '*** END OF THIS PROJECT GUTENBERG', '***END OF THE PROJECT GUTENBERG', '***END OF THIS PROJECT GUTENBERG', 'End of the Project Gutenberg', 'End of Project Gutenberg'];
 
-        for (const marker of startMarkers) {
-          const idx = cleaned.indexOf(marker);
-          if (idx !== -1) {
-            const nextLine = cleaned.indexOf('\n', idx);
-            cleaned = cleaned.substring(nextLine + 1);
-            break;
+            for (const marker of startMarkers) {
+              const idx = cleaned.indexOf(marker);
+              if (idx !== -1) {
+                const nextLine = cleaned.indexOf('\n', idx);
+                cleaned = cleaned.substring(nextLine + 1);
+                break;
+              }
+            }
+
+            for (const marker of endMarkers) {
+              const idx = cleaned.indexOf(marker);
+              if (idx !== -1) {
+                cleaned = cleaned.substring(0, idx);
+                break;
+              }
+            }
+
+            setText(cleaned.trim());
+            setLoading(false);
+            return;
           }
+        } catch (e) {
+          // try next URL
         }
+      }
+      setError('Could not load book text. The book may not be available in plain text format.');
+      setLoading(false);
+    }
 
-        for (const marker of endMarkers) {
-          const idx = cleaned.indexOf(marker);
-          if (idx !== -1) {
-            cleaned = cleaned.substring(0, idx);
-            break;
-          }
-        }
-
-        setText(cleaned.trim());
-        setLoading(false);
-      })
-      .catch(err => {
-        setError(err.message);
-        setLoading(false);
-      });
+    fetchText();
   }, [bookId]);
 
   return { text, loading, error };
@@ -175,14 +192,16 @@ export function useBookCover(bookId, title, author) {
 
   useEffect(() => {
     if (!bookId) return;
-    const params = new URLSearchParams({ title: title || '', author: author || '' });
-    fetch(`/api/cover/${bookId}?${params.toString()}`)
-      .then(res => res.json())
-      .then(data => {
-        setCover(data.image);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    // Check cache first, then generate
+    const cached = getCachedCover(bookId);
+    if (cached) {
+      setCover(cached);
+      setLoading(false);
+      return;
+    }
+    const image = generateBookCover(title || 'Untitled', author || 'Unknown', bookId);
+    setCover(image);
+    setLoading(false);
   }, [bookId, title, author]);
 
   return { cover, loading };
@@ -192,17 +211,39 @@ export function useBookSummary(bookId, title, author) {
   const [summary, setSummary] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const fetchSummary = useCallback(() => {
+  const fetchSummary = useCallback(async () => {
     if (!bookId) return;
+
+    // Check cache
+    const cached = getCachedSummary(bookId);
+    if (cached) {
+      setSummary(cached);
+      return;
+    }
+
     setLoading(true);
-    const params = new URLSearchParams({ title: title || '', author: author || '' });
-    fetch(`/api/summary/${bookId}?${params.toString()}`)
-      .then(res => res.json())
-      .then(data => {
-        setSummary(data.summary);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+
+    try {
+      const urls = GUTENBERG_TEXT_URLS(bookId);
+      let text = '';
+
+      for (const url of urls) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            text = await res.text();
+            break;
+          }
+        } catch (e) {}
+      }
+
+      const result = generateSummary(text, title || 'Untitled', author || 'Unknown', bookId);
+      setSummary(result);
+    } catch (e) {
+      setSummary(`"${title}" by ${author} is a classic work from Project Gutenberg.`);
+    } finally {
+      setLoading(false);
+    }
   }, [bookId, title, author]);
 
   return { summary, loading, fetchSummary };
