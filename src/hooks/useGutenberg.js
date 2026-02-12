@@ -24,30 +24,29 @@ export { GENRES, ALPHABET };
 
 const GUTENDEX_URL = 'https://gutendex.com/books';
 
-// Detect if running as a static site (GitHub Pages) vs with backend server
-const isStaticDeploy = !window.location.hostname.includes('localhost') &&
-  !window.location.hostname.includes('127.0.0.1');
+// Fetch book text by ID. Uses the /api/text serverless proxy to avoid CORS
+// issues with gutenberg.org. Falls back to direct fetch for local dev.
+async function fetchBookText(bookId) {
+  // Try the serverless API proxy first (works on Vercel deployment)
+  try {
+    const res = await fetch(`/api/text?id=${bookId}`);
+    if (res.ok) return await res.text();
+  } catch (e) {
+    // proxy not available, try direct
+  }
 
-// Build list of URLs to try for a given Gutenberg text URL.
-// On static deploys, wrap with CORS proxies as fallbacks.
-function getProxiedUrls(url) {
-  if (!isStaticDeploy) return [url];
-  return [
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    url,
+  // Fallback: direct fetch (works on localhost / with Express server)
+  const urls = [
+    `https://www.gutenberg.org/files/${bookId}/${bookId}-0.txt`,
+    `https://www.gutenberg.org/cache/epub/${bookId}/pg${bookId}.txt`,
+    `https://www.gutenberg.org/files/${bookId}/${bookId}.txt`,
   ];
-}
-
-// Fetch a Gutenberg text URL, trying CORS proxies on static deploys
-async function fetchWithProxy(url, signal) {
-  const candidates = getProxiedUrls(url);
-  for (const candidate of candidates) {
+  for (const url of urls) {
     try {
-      const res = await fetch(candidate, signal ? { signal } : undefined);
-      if (res.ok) return res;
+      const res = await fetch(url);
+      if (res.ok) return await res.text();
     } catch (e) {
-      // try next proxy
+      // try next
     }
   }
   return null;
@@ -153,12 +152,6 @@ export function useGutenberg() {
   };
 }
 
-const GUTENBERG_TEXT_URLS = (id) => [
-  `https://www.gutenberg.org/files/${id}/${id}-0.txt`,
-  `https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`,
-  `https://www.gutenberg.org/files/${id}/${id}.txt`,
-];
-
 export function useBookText(bookId) {
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
@@ -168,48 +161,41 @@ export function useBookText(bookId) {
     if (!bookId) return;
     setLoading(true);
 
-    async function fetchText() {
-      const urls = GUTENBERG_TEXT_URLS(bookId);
-      for (const url of urls) {
-        try {
-          const res = await fetchWithProxy(url);
-          if (res) {
-            const rawText = await res.text();
-            // Strip Gutenberg header/footer
-            let cleaned = rawText;
-            const startMarkers = ['*** START OF THE PROJECT GUTENBERG', '*** START OF THIS PROJECT GUTENBERG', '***START OF THE PROJECT GUTENBERG', '***START OF THIS PROJECT GUTENBERG'];
-            const endMarkers = ['*** END OF THE PROJECT GUTENBERG', '*** END OF THIS PROJECT GUTENBERG', '***END OF THE PROJECT GUTENBERG', '***END OF THIS PROJECT GUTENBERG', 'End of the Project Gutenberg', 'End of Project Gutenberg'];
+    async function loadText() {
+      const rawText = await fetchBookText(bookId);
+      if (!rawText) {
+        setError('Could not load book text. The book may not be available in plain text format.');
+        setLoading(false);
+        return;
+      }
 
-            for (const marker of startMarkers) {
-              const idx = cleaned.indexOf(marker);
-              if (idx !== -1) {
-                const nextLine = cleaned.indexOf('\n', idx);
-                cleaned = cleaned.substring(nextLine + 1);
-                break;
-              }
-            }
+      // Strip Gutenberg header/footer
+      let cleaned = rawText;
+      const startMarkers = ['*** START OF THE PROJECT GUTENBERG', '*** START OF THIS PROJECT GUTENBERG', '***START OF THE PROJECT GUTENBERG', '***START OF THIS PROJECT GUTENBERG'];
+      const endMarkers = ['*** END OF THE PROJECT GUTENBERG', '*** END OF THIS PROJECT GUTENBERG', '***END OF THE PROJECT GUTENBERG', '***END OF THIS PROJECT GUTENBERG', 'End of the Project Gutenberg', 'End of Project Gutenberg'];
 
-            for (const marker of endMarkers) {
-              const idx = cleaned.indexOf(marker);
-              if (idx !== -1) {
-                cleaned = cleaned.substring(0, idx);
-                break;
-              }
-            }
-
-            setText(cleaned.trim());
-            setLoading(false);
-            return;
-          }
-        } catch (e) {
-          // try next URL
+      for (const marker of startMarkers) {
+        const idx = cleaned.indexOf(marker);
+        if (idx !== -1) {
+          const nextLine = cleaned.indexOf('\n', idx);
+          cleaned = cleaned.substring(nextLine + 1);
+          break;
         }
       }
-      setError('Could not load book text. The book may not be available in plain text format.');
+
+      for (const marker of endMarkers) {
+        const idx = cleaned.indexOf(marker);
+        if (idx !== -1) {
+          cleaned = cleaned.substring(0, idx);
+          break;
+        }
+      }
+
+      setText(cleaned.trim());
       setLoading(false);
     }
 
-    fetchText();
+    loadText();
   }, [bookId]);
 
   return { text, loading, error };
@@ -253,17 +239,7 @@ export function useBookSummary(bookId, title, author) {
     setLoading(true);
 
     try {
-      const urls = GUTENBERG_TEXT_URLS(bookId);
-      let text = '';
-
-      for (const url of urls) {
-        const res = await fetchWithProxy(url);
-        if (res) {
-          text = await res.text();
-          break;
-        }
-      }
-
+      const text = await fetchBookText(bookId) || '';
       const result = generateSummary(text, title || 'Untitled', author || 'Unknown', bookId);
       setSummary(result);
     } catch (e) {
