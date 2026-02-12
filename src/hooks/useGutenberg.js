@@ -28,11 +28,29 @@ const GUTENDEX_URL = 'https://gutendex.com/books';
 const isStaticDeploy = !window.location.hostname.includes('localhost') &&
   !window.location.hostname.includes('127.0.0.1');
 
-// CORS proxy for fetching Gutenberg text files from static deployments
-const CORS_PROXY = 'https://corsproxy.io/?url=';
+// Build list of URLs to try for a given Gutenberg text URL.
+// On static deploys, wrap with CORS proxies as fallbacks.
+function getProxiedUrls(url) {
+  if (!isStaticDeploy) return [url];
+  return [
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url,
+  ];
+}
 
-function proxyUrl(url) {
-  return isStaticDeploy ? `${CORS_PROXY}${encodeURIComponent(url)}` : url;
+// Fetch a Gutenberg text URL, trying CORS proxies on static deploys
+async function fetchWithProxy(url, signal) {
+  const candidates = getProxiedUrls(url);
+  for (const candidate of candidates) {
+    try {
+      const res = await fetch(candidate, signal ? { signal } : undefined);
+      if (res.ok) return res;
+    } catch (e) {
+      // try next proxy
+    }
+  }
+  return null;
 }
 
 export function useGutenberg() {
@@ -154,8 +172,8 @@ export function useBookText(bookId) {
       const urls = GUTENBERG_TEXT_URLS(bookId);
       for (const url of urls) {
         try {
-          const res = await fetch(proxyUrl(url));
-          if (res.ok) {
+          const res = await fetchWithProxy(url);
+          if (res) {
             const rawText = await res.text();
             // Strip Gutenberg header/footer
             let cleaned = rawText;
@@ -239,13 +257,11 @@ export function useBookSummary(bookId, title, author) {
       let text = '';
 
       for (const url of urls) {
-        try {
-          const res = await fetch(proxyUrl(url));
-          if (res.ok) {
-            text = await res.text();
-            break;
-          }
-        } catch (e) {}
+        const res = await fetchWithProxy(url);
+        if (res) {
+          text = await res.text();
+          break;
+        }
       }
 
       const result = generateSummary(text, title || 'Untitled', author || 'Unknown', bookId);
